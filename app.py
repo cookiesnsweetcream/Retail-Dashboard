@@ -2,7 +2,7 @@
 """
 Retail Inventory Optimization Dashboard
 =========================================
-Dashboard analitik bisnis statis untuk membantu Manajer Retail memahami
+Dashboard analitik bisnis statis untuk membantu manajer untuk memahami
 hasil segmentasi tingkat overstock produk (Agglomerative Clustering,
 Ward Linkage, n_clusters=2) dan mengambil keputusan terkait persediaan.
 
@@ -151,7 +151,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<p class="sub-header">Dashboard ini membantu Manajer Retail memantau status persediaan produk '
+    '<p class="sub-header">Dashboard ini membantu manajer untuk memantau status persediaan produk '
     "dan memberikan rekomendasi aksi bisnis berdasarkan hasil segmentasi tingkat overstock, "
     "sehingga keputusan pemesanan, promosi, dan alokasi stok dapat diambil lebih cepat dan tepat.</p>",
     unsafe_allow_html=True,
