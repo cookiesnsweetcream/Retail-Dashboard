@@ -1,537 +1,395 @@
-"""
-==================================================================
-DASHBOARD ANALITIK BISNIS - MANAJEMEN OVERSTOCK PERSEDIAAN RETAIL
-Berbasis Hasil Segmentasi Agglomerative Clustering
-==================================================================
-Ditujukan untuk: Manajer Retail
-Tujuan: Mendukung pengambilan keputusan strategis terkait
-        manajemen persediaan produk & mitigasi overstock.
-==================================================================
-"""
+# ==========================================================
+# DASHBOARD SEGMENTASI TINGKAT OVERSTOCK PERSEDIAAN PRODUK RETAIL
+# Model: Agglomerative Clustering (Unsupervised Learning)
+# Target Pengguna: Manajer Retail (Non-Teknis)
+# ==========================================================
 
-import streamlit as st
-import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+
 import numpy as np
+import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
+import streamlit as st
 
-# ==================================================================
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.cluster import AgglomerativeClustering
+
+# ==========================================================
 # 1. KONFIGURASI HALAMAN
-# ==================================================================
+# ==========================================================
 
 st.set_page_config(
-    page_title="Dashboard Manajemen Overstock Persediaan",
+    page_title="Dashboard Segmentasi Overstock Retail",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ------------------------------------------------------------------
-# Sedikit styling tambahan agar tampilan lebih rapi & profesional
-# ------------------------------------------------------------------
-st.markdown(
+DATA_PATH = "retail_store_inventory.csv"
+
+CLUSTER_NAME_MAP = {
+    0: "High Overstock",
+    1: "Moderate/Low Overstock"
+}
+
+CLUSTER_COLOR_MAP = {
+    "High Overstock": "#E74C3C",
+    "Moderate/Low Overstock": "#2ECC71"
+}
+
+
+# ==========================================================
+# 2. LOAD DATA & PIPELINE CLUSTERING (BACKGROUND, TIDAK TAMPAK KE USER)
+# ==========================================================
+
+@st.cache_data(show_spinner="Memuat dan memproses data...")
+def load_and_cluster_data(path: str) -> pd.DataFrame:
     """
-    <style>
-    div[data-testid="stMetric"] {
-        background-color: #f8f9fb;
-        border: 1px solid #e6e6e6;
-        border-radius: 10px;
-        padding: 12px 16px;
-    }
-    .block-container {
-        padding-top: 1.5rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# ==================================================================
-# 2. FUNGSI LOAD DATA
-# ==================================================================
-
-@st.cache_data
-def load_data(file) -> pd.DataFrame:
+    1. Membaca dataset mentah lokal.
+    2. Membersihkan missing value & duplikat.
+    3. Melakukan encoding kategorikal (khusus untuk kalkulasi model).
+    4. Mengagregasi data pada level Store ID + Product ID (unit analisis produk).
+    5. Menstandardisasi fitur numerik.
+    6. Menjalankan AgglomerativeClustering (n_clusters=2, linkage='ward').
+    7. Menggabungkan label Cluster & Segment kembali ke data transaksi asli
+       agar tetap bisa difilter per baris (Region, Category, Date).
     """
-    Membaca dataset persediaan retail hasil akhir clustering.
-    Dataset diasumsikan sudah memiliki kolom 'Cluster' (0 / 1)
-    hasil dari notebook Agglomerative Clustering.
-    """
-    df = pd.read_csv(file)
+    df_raw = pd.read_csv(path)
+    df_raw["Date"] = pd.to_datetime(df_raw["Date"])
 
-    # Pastikan kolom Date bertipe datetime
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df_clean = df_raw.copy()
 
-    # Pastikan kolom Cluster bertipe integer
-    if "Cluster" in df.columns:
-        df["Cluster"] = df["Cluster"].astype(int)
+    # --- Imputasi missing value ---
+    numeric_cols = df_clean.select_dtypes(include=["int64", "float64"]).columns
+    if len(numeric_cols) > 0 and df_clean[numeric_cols].isnull().sum().sum() > 0:
+        imputer_num = SimpleImputer(strategy="median")
+        df_clean[numeric_cols] = imputer_num.fit_transform(df_clean[numeric_cols])
 
-    return df
+    categorical_cols = df_clean.select_dtypes(include=["object"]).columns
+    if len(categorical_cols) > 0 and df_clean[categorical_cols].isnull().sum().sum() > 0:
+        imputer_cat = SimpleImputer(strategy="most_frequent")
+        df_clean[categorical_cols] = imputer_cat.fit_transform(df_clean[categorical_cols])
 
+    # --- Hapus duplikat ---
+    df_clean.drop_duplicates(inplace=True)
 
-def map_cluster_segment(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Melakukan pemetaan label segmen (High Overstock / Moderate-Low Overstock)
-    secara DINAMIS berdasarkan rata-rata Inventory Level tiap cluster —
-    bukan hardcode 0/1 — karena label numerik hasil Agglomerative
-    Clustering bersifat arbitrer dan bisa berbeda tiap kali model dilatih ulang.
-    Cluster dengan rata-rata Inventory Level LEBIH TINGGI relatif terhadap
-    Units Sold akan diberi label "High Overstock".
-    """
-    df = df.copy()
+    # --- Pecah tanggal untuk kebutuhan fitur numerik model ---
+    df_encoded = df_clean.copy()
+    df_encoded["Year"] = df_encoded["Date"].dt.year
+    df_encoded["Month"] = df_encoded["Date"].dt.month
+    df_encoded["Day"] = df_encoded["Date"].dt.day
 
-    cluster_profile = (
-        df.groupby("Cluster")
-        .agg(
-            avg_inventory=("Inventory Level", "mean"),
-            avg_sold=("Units Sold", "mean")
-        )
+    # --- Label Encoding untuk fitur kategorikal (khusus perhitungan model) ---
+    cat_columns_to_encode = [
+        "Store ID", "Product ID", "Category", "Region",
+        "Weather Condition", "Holiday/Promotion", "Seasonality"
+    ]
+    for col in cat_columns_to_encode:
+        if col in df_encoded.columns:
+            le = LabelEncoder()
+            df_encoded[col + "_enc"] = le.fit_transform(df_encoded[col].astype(str))
+
+    # --- Penanganan outlier (IQR clipping) pada fitur numerik utama ---
+    outlier_cols = [
+        "Inventory Level", "Units Sold", "Units Ordered",
+        "Demand Forecast", "Price", "Discount", "Competitor Pricing"
+    ]
+    for col in outlier_cols:
+        if col in df_encoded.columns:
+            Q1 = df_encoded[col].quantile(0.25)
+            Q3 = df_encoded[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower, upper = Q1 - 1.5 * IQR, Q3 + 1.5 * IQR
+            df_encoded[col] = df_encoded[col].clip(lower, upper)
+
+    # --- Agregasi ke level Store ID + Product ID (unit analisis produk) ---
+    product_df = (
+        df_encoded
+        .groupby(["Store ID", "Product ID"])
+        .agg({
+            "Category_enc": "first",
+            "Region_enc": "first",
+            "Inventory Level": "mean",
+            "Units Sold": "sum",
+            "Units Ordered": "sum",
+            "Demand Forecast": "mean",
+            "Price": "mean",
+            "Discount": "mean",
+            "Weather Condition_enc": "first",
+            "Holiday/Promotion_enc": "mean",
+            "Competitor Pricing": "mean",
+            "Seasonality_enc": "first",
+            "Year": "first",
+            "Month": "mean",
+            "Day": "mean",
+        })
         .reset_index()
     )
 
-    # Rasio persediaan terhadap penjualan -> makin besar rasio, makin "overstock"
-    cluster_profile["overstock_ratio"] = (
-        cluster_profile["avg_inventory"] / cluster_profile["avg_sold"].replace(0, np.nan)
+    feature_cols = [
+        "Category_enc", "Region_enc", "Inventory Level", "Units Sold",
+        "Units Ordered", "Demand Forecast", "Price", "Discount",
+        "Weather Condition_enc", "Holiday/Promotion_enc", "Competitor Pricing",
+        "Seasonality_enc", "Year", "Month", "Day"
+    ]
+
+    X = product_df[feature_cols]
+
+    # --- Standardisasi fitur ---
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # --- Model Agglomerative Clustering (dijalankan otomatis di latar belakang) ---
+    model = AgglomerativeClustering(n_clusters=2, linkage="ward")
+    product_df["Cluster"] = model.fit_predict(X_scaled)
+    product_df["Segment"] = product_df["Cluster"].map(CLUSTER_NAME_MAP)
+
+    # --- Gabungkan label Cluster & Segment kembali ke data transaksi asli ---
+    df_final = df_clean.merge(
+        product_df[["Store ID", "Product ID", "Cluster", "Segment"]],
+        on=["Store ID", "Product ID"],
+        how="left"
     )
-    cluster_profile["overstock_ratio"] = cluster_profile["overstock_ratio"].fillna(
-        cluster_profile["avg_inventory"]
-    )
 
-    cluster_profile = cluster_profile.sort_values("overstock_ratio", ascending=False).reset_index(drop=True)
-
-    label_map = {}
-    for i, row in cluster_profile.iterrows():
-        if i == 0:
-            label_map[row["Cluster"]] = "High Overstock"
-        else:
-            label_map[row["Cluster"]] = "Moderate / Low Overstock"
-
-    df["Segmen"] = df["Cluster"].map(label_map)
-    return df, label_map
+    return df_final
 
 
-# ==================================================================
-# 3. HEADER
-# ==================================================================
-
-st.title("📦 Dashboard Analitik Persediaan Retail")
-st.caption(
-    "Sistem Informasi Analitik Bisnis — Segmentasi Overstock Produk "
-    "menggunakan Agglomerative Clustering"
-)
-st.divider()
-
-
-# ==================================================================
-# 4. UPLOAD / LOAD DATASET
-# ==================================================================
-
-uploaded_file = st.sidebar.file_uploader(
-    "📁 Unggah Dataset (CSV)",
-    type=["csv"],
-    help="Dataset harus sudah memiliki kolom 'Cluster' hasil dari model Agglomerative Clustering."
-)
-
-st.sidebar.divider()
-
-if uploaded_file is None:
-    st.info(
-        "⬆️ Silakan unggah dataset CSV pada sidebar untuk memulai analisis. "
-        "Dataset harus memiliki kolom **'Cluster'** hasil dari proses clustering."
-    )
-    st.stop()
-
-df_raw = load_data(uploaded_file)
-
-required_cols = [
-    "Store ID", "Product ID", "Category", "Region",
-    "Inventory Level", "Units Sold", "Units Ordered",
-    "Demand Forecast", "Cluster"
-]
-missing_cols = [c for c in required_cols if c not in df_raw.columns]
-
-if missing_cols:
+try:
+    df = load_and_cluster_data(DATA_PATH)
+except FileNotFoundError:
     st.error(
-        f"❌ Kolom berikut tidak ditemukan pada dataset: {', '.join(missing_cols)}. "
-        "Pastikan dataset sudah sesuai format hasil clustering."
+        f"❌ File `{DATA_PATH}` tidak ditemukan. "
+        f"Pastikan file dataset berada di folder yang sama dengan `app.py`."
     )
     st.stop()
 
-df_raw, label_map = map_cluster_segment(df_raw)
 
+# ==========================================================
+# 3. SIDEBAR — FILTER
+# ==========================================================
 
-# ==================================================================
-# 5. SIDEBAR FILTER
-# ==================================================================
-
-st.sidebar.header("🔎 Filter Data")
+st.sidebar.title("🔎 Filter Dashboard")
+st.sidebar.markdown("Gunakan filter berikut untuk menyesuaikan tampilan data.")
 
 # --- Filter Region ---
-region_options = sorted(df_raw["Region"].dropna().unique().tolist())
-selected_region = st.sidebar.multiselect(
-    "Wilayah (Region)",
+region_options = sorted(df["Region"].dropna().unique().tolist())
+selected_regions = st.sidebar.multiselect(
+    "Pilih Region",
     options=region_options,
     default=region_options
 )
 
 # --- Filter Category ---
-category_options = sorted(df_raw["Category"].dropna().unique().tolist())
-selected_category = st.sidebar.multiselect(
-    "Kategori Produk",
+category_options = sorted(df["Category"].dropna().unique().tolist())
+selected_categories = st.sidebar.multiselect(
+    "Pilih Kategori Produk",
     options=category_options,
     default=category_options
 )
 
-# --- Filter Store ID ---
-store_options = sorted(df_raw["Store ID"].dropna().unique().tolist())
-selected_store = st.sidebar.multiselect(
-    "ID Toko (Store ID)",
-    options=store_options,
-    default=store_options
+# --- Filter Rentang Tanggal ---
+min_date = df["Date"].min().date()
+max_date = df["Date"].max().date()
+
+selected_date_range = st.sidebar.date_input(
+    "Pilih Rentang Tanggal",
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date
 )
 
-# --- Filter Seasonality (jika tersedia) ---
-if "Seasonality" in df_raw.columns:
-    season_options = sorted(df_raw["Seasonality"].dropna().unique().tolist())
-    selected_season = st.sidebar.multiselect(
-        "Musim (Seasonality)",
-        options=season_options,
-        default=season_options
-    )
-else:
-    selected_season = None
-
-# --- Filter Rentang Tanggal (jika tersedia) ---
-if "Date" in df_raw.columns and df_raw["Date"].notna().any():
-    min_date = df_raw["Date"].min().date()
-    max_date = df_raw["Date"].max().date()
-    selected_date_range = st.sidebar.date_input(
-        "Rentang Tanggal",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
-    )
-else:
-    selected_date_range = None
-
-st.sidebar.divider()
-st.sidebar.markdown(
-    "**Legenda Segmen:**\n"
-    "- 🔴 High Overstock\n"
-    "- 🟢 Moderate / Low Overstock"
-)
-
-
-# ==================================================================
-# 6. PENERAPAN FILTER
-# ==================================================================
-
-df = df_raw.copy()
-
-df = df[
-    df["Region"].isin(selected_region)
-    & df["Category"].isin(selected_category)
-    & df["Store ID"].isin(selected_store)
-]
-
-if selected_season is not None:
-    df = df[df["Seasonality"].isin(selected_season)]
-
-if selected_date_range is not None and isinstance(selected_date_range, tuple) and len(selected_date_range) == 2:
+if isinstance(selected_date_range, tuple) and len(selected_date_range) == 2:
     start_date, end_date = selected_date_range
-    df = df[
-        (df["Date"] >= pd.to_datetime(start_date))
-        & (df["Date"] <= pd.to_datetime(end_date))
-    ]
+else:
+    start_date, end_date = min_date, max_date
 
-if df.empty:
-    st.warning("⚠️ Tidak ada data yang sesuai dengan kombinasi filter yang dipilih.")
+st.sidebar.markdown("---")
+st.sidebar.caption(
+    "Segmentasi dihasilkan otomatis oleh model **Agglomerative Clustering** "
+    "berdasarkan pola Inventory Level, Units Sold, Units Ordered, dan fitur lainnya."
+)
+
+# --- Terapkan filter ---
+mask = (
+    df["Region"].isin(selected_regions)
+    & df["Category"].isin(selected_categories)
+    & (df["Date"].dt.date >= start_date)
+    & (df["Date"].dt.date <= end_date)
+)
+df_filtered = df.loc[mask].copy()
+
+if df_filtered.empty:
+    st.warning("⚠️ Tidak ada data yang sesuai dengan filter yang dipilih. Silakan ubah filter Anda.")
     st.stop()
 
 
-# ==================================================================
-# 7. RINGKASAN METRIK UTAMA (KPI CARDS)
-# ==================================================================
+# ==========================================================
+# 4. HEADER
+# ==========================================================
 
-st.subheader("📊 Ringkasan Kondisi Persediaan")
+st.title("📦 Dashboard Segmentasi Tingkat Overstock Persediaan Produk Retail")
+st.markdown(
+    "Dashboard ini membantu **Manajer Retail** memantau produk yang berpotensi mengalami "
+    "*overstock* berdasarkan hasil segmentasi model **Agglomerative Clustering**, "
+    "sehingga keputusan operasional (diskon, penghentian order, distribusi ulang stok) "
+    "dapat diambil lebih cepat dan berbasis data."
+)
+st.markdown("---")
 
-total_high = int((df["Segmen"] == "High Overstock").sum())
-total_moderate = int((df["Segmen"] == "Moderate / Low Overstock").sum())
-total_all = total_high + total_moderate
-pct_high = (total_high / total_all * 100) if total_all > 0 else 0
 
-avg_inventory = df["Inventory Level"].mean()
-total_units_sold = df["Units Sold"].sum()
-avg_demand_forecast = df["Demand Forecast"].mean()
+# ==========================================================
+# 5. KPI CARDS
+# ==========================================================
 
-col1, col2, col3, col4, col5 = st.columns(5)
+total_high = int((df_filtered["Segment"] == "High Overstock").sum())
+total_moderate = int((df_filtered["Segment"] == "Moderate/Low Overstock").sum())
+avg_inventory = df_filtered["Inventory Level"].mean()
+avg_units_sold = df_filtered["Units Sold"].mean()
+
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric(
-        "🔴 Produk High Overstock",
-        f"{total_high:,}",
-        f"{pct_high:.1f}% dari total data"
-    )
+    st.metric("🔴 High Overstock", f"{total_high:,}", help="Jumlah baris data pada segmen High Overstock (Cluster 0)")
 
 with col2:
-    st.metric(
-        "🟢 Produk Moderate/Low Overstock",
-        f"{total_moderate:,}",
-        f"{100 - pct_high:.1f}% dari total data"
-    )
+    st.metric("🟢 Moderate/Low Overstock", f"{total_moderate:,}", help="Jumlah baris data pada segmen Moderate/Low Overstock (Cluster 1)")
 
 with col3:
-    st.metric(
-        "📦 Rata-rata Inventory Level",
-        f"{avg_inventory:,.0f} unit"
-    )
+    st.metric("📊 Rata-rata Inventory Level", f"{avg_inventory:,.1f}")
 
 with col4:
-    st.metric(
-        "🛒 Total Units Sold",
-        f"{total_units_sold:,.0f} unit"
+    st.metric("🛒 Rata-rata Units Sold", f"{avg_units_sold:,.1f}")
+
+st.markdown("---")
+
+
+# ==========================================================
+# 6. VISUALISASI GRAFIK
+# ==========================================================
+
+row1_col1, row1_col2 = st.columns([1, 1.4])
+
+# --- Proporsi Cluster (Pie Chart) ---
+with row1_col1:
+    st.subheader("Proporsi Segmentasi Overstock")
+    segment_counts = df_filtered["Segment"].value_counts().reset_index()
+    segment_counts.columns = ["Segment", "Jumlah"]
+
+    fig_pie = px.pie(
+        segment_counts,
+        names="Segment",
+        values="Jumlah",
+        color="Segment",
+        color_discrete_map=CLUSTER_COLOR_MAP,
+        hole=0.45
     )
+    fig_pie.update_traces(textinfo="percent+label")
+    fig_pie.update_layout(showlegend=True, margin=dict(t=10, b=10, l=10, r=10))
+    st.plotly_chart(fig_pie, use_container_width=True)
 
-with col5:
-    st.metric(
-        "📈 Rata-rata Demand Forecast",
-        f"{avg_demand_forecast:,.0f} unit"
-    )
-
-st.divider()
-
-
-# ==================================================================
-# 8. VISUALISASI UTAMA
-# ==================================================================
-
-tab1, tab2, tab3 = st.tabs([
-    "📌 Distribusi Overstock",
-    "📌 Stok vs Penjualan",
-    "📌 Tren Persediaan"
-])
-
-# ------------------------------------------------------------------
-# CHART 1 — Distribusi Overstock berdasarkan Kategori / Wilayah
-# ------------------------------------------------------------------
-with tab1:
-    st.markdown("#### Distribusi Segmen Overstock")
-
-    dimensi = st.radio(
-        "Kelompokkan berdasarkan:",
-        options=["Kategori Produk", "Wilayah (Region)"],
-        horizontal=True
-    )
-    kolom_dimensi = "Category" if dimensi == "Kategori Produk" else "Region"
-
-    dist_df = (
-        df.groupby([kolom_dimensi, "Segmen"])
+# --- High Overstock berdasarkan Category (Bar Chart) ---
+with row1_col2:
+    st.subheader("Kategori Produk dengan High Overstock Tertinggi")
+    high_by_cat = (
+        df_filtered[df_filtered["Segment"] == "High Overstock"]
+        .groupby("Category")
         .size()
-        .reset_index(name="Jumlah Produk")
+        .reset_index(name="Jumlah")
+        .sort_values("Jumlah", ascending=False)
     )
 
-    fig1 = px.bar(
-        dist_df,
-        x=kolom_dimensi,
-        y="Jumlah Produk",
-        color="Segmen",
-        barmode="group",
-        text="Jumlah Produk",
-        color_discrete_map={
-            "High Overstock": "#E4572E",
-            "Moderate / Low Overstock": "#29A19C"
-        },
-        title=f"Jumlah Produk per Segmen Overstock — Berdasarkan {dimensi}"
+    fig_bar_cat = px.bar(
+        high_by_cat,
+        x="Category",
+        y="Jumlah",
+        color="Jumlah",
+        color_continuous_scale="Reds",
+        text="Jumlah"
     )
-    fig1.update_layout(
-        xaxis_title=dimensi,
-        yaxis_title="Jumlah Produk",
-        legend_title="Segmen Overstock",
-        height=480
+    fig_bar_cat.update_layout(
+        xaxis_title="Kategori Produk",
+        yaxis_title="Jumlah Produk (High Overstock)",
+        margin=dict(t=10, b=10, l=10, r=10),
+        coloraxis_showscale=False
     )
-    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig_bar_cat, use_container_width=True)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        fig_pie = px.pie(
-            df,
-            names="Segmen",
-            title="Proporsi Segmen Overstock (Keseluruhan)",
-            color="Segmen",
-            color_discrete_map={
-                "High Overstock": "#E4572E",
-                "Moderate / Low Overstock": "#29A19C"
-            },
-            hole=0.45
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
+st.markdown("---")
 
-    with col_b:
-        st.markdown("##### 💡 Insight Singkat")
-        top_cat = (
-            df[df["Segmen"] == "High Overstock"]
-            .groupby(kolom_dimensi)
-            .size()
-            .sort_values(ascending=False)
-        )
-        if not top_cat.empty:
-            st.write(
-                f"**{dimensi}** dengan jumlah produk *High Overstock* "
-                f"terbanyak adalah **{top_cat.index[0]}** "
-                f"dengan **{int(top_cat.iloc[0])} produk**. "
-                "Disarankan menjadi prioritas evaluasi strategi harga "
-                "dan volume pemesanan berikutnya."
-            )
-
-# ------------------------------------------------------------------
-# CHART 2 — Inventory Level vs Units Sold (per Cluster)
-# ------------------------------------------------------------------
-with tab2:
-    st.markdown("#### Analisis Persediaan vs Penjualan per Segmen")
-
-    fig2 = px.scatter(
-        df,
-        x="Inventory Level",
-        y="Units Sold",
-        color="Segmen",
-        size="Demand Forecast",
-        hover_data=["Store ID", "Product ID", "Category", "Region"],
-        color_discrete_map={
-            "High Overstock": "#E4572E",
-            "Moderate / Low Overstock": "#29A19C"
-        },
-        opacity=0.7,
-        title="Inventory Level vs Units Sold — Diwarnai Berdasarkan Segmen Overstock"
-    )
-    fig2.update_layout(
-        xaxis_title="Tingkat Persediaan (Inventory Level)",
-        yaxis_title="Jumlah Terjual (Units Sold)",
-        height=520
-    )
-    st.plotly_chart(fig2, use_container_width=True)
-
-    st.info(
-        "🔎 **Cara membaca grafik:** Titik berwarna merah (High Overstock) yang berada "
-        "di sisi kanan bawah menunjukkan produk dengan **persediaan sangat tinggi namun "
-        "penjualan rendah** — inilah kandidat utama untuk diberi diskon atau dikurangi "
-        "jumlah pemesanan berikutnya."
-    )
-
-# ------------------------------------------------------------------
-# CHART 3 — Tren Inventory Level dari Waktu ke Waktu
-# ------------------------------------------------------------------
-with tab3:
-    st.markdown("#### Tren Persediaan dari Waktu ke Waktu")
-
-    if "Date" in df.columns and df["Date"].notna().any():
-        granularitas = st.radio(
-            "Granularitas waktu:",
-            options=["Harian", "Mingguan", "Bulanan"],
-            horizontal=True
-        )
-
-        freq_map = {"Harian": "D", "Mingguan": "W", "Bulanan": "M"}
-
-        trend_df = (
-            df.set_index("Date")
-            .groupby([pd.Grouper(freq=freq_map[granularitas]), "Segmen"])["Inventory Level"]
-            .mean()
-            .reset_index()
-        )
-
-        fig3 = px.line(
-            trend_df,
-            x="Date",
-            y="Inventory Level",
-            color="Segmen",
-            markers=True,
-            color_discrete_map={
-                "High Overstock": "#E4572E",
-                "Moderate / Low Overstock": "#29A19C"
-            },
-            title=f"Tren Rata-rata Inventory Level ({granularitas}) per Segmen"
-        )
-        fig3.update_layout(
-            xaxis_title="Tanggal",
-            yaxis_title="Rata-rata Inventory Level",
-            height=480
-        )
-        st.plotly_chart(fig3, use_container_width=True)
-    else:
-        st.warning(
-            "⚠️ Kolom 'Date' tidak tersedia atau tidak valid pada dataset, "
-            "sehingga grafik tren waktu tidak dapat ditampilkan."
-        )
-
-st.divider()
-
-
-# ==================================================================
-# 9. REKOMENDASI TINGKAT MANAJEMEN
-# ==================================================================
-
-st.subheader("📋 Rekomendasi Tindakan Manajerial — Produk High Overstock")
-
-st.markdown(
-    "Tabel di bawah ini menampilkan daftar **Produk & Toko** yang teridentifikasi "
-    "sebagai **High Overstock**. Manajer disarankan untuk mempertimbangkan "
-    "pemberian **potongan harga (discount)** atau **pengurangan kuota Units Ordered** "
-    "pada periode pemesanan berikutnya."
+# --- Scatter Plot Inventory vs Units Sold ---
+st.subheader("Analisis Inventory Level vs Units Sold per Segmen")
+st.caption(
+    "Grafik ini membuktikan secara visual mengapa suatu produk dikategorikan Overstock: "
+    "titik merah (High Overstock) umumnya memiliki Inventory Level tinggi namun Units Sold rendah."
 )
 
-high_overstock_df = df[df["Segmen"] == "High Overstock"].copy()
+fig_scatter = px.scatter(
+    df_filtered,
+    x="Inventory Level",
+    y="Units Sold",
+    color="Segment",
+    color_discrete_map=CLUSTER_COLOR_MAP,
+    size="Units Ordered",
+    hover_data=["Store ID", "Product ID", "Category", "Region"],
+    opacity=0.6
+)
+fig_scatter.update_layout(margin=dict(t=10, b=10, l=10, r=10))
+st.plotly_chart(fig_scatter, use_container_width=True)
 
-if high_overstock_df.empty:
-    st.success("✅ Tidak ada produk yang teridentifikasi sebagai High Overstock pada filter saat ini.")
-else:
-    tampilan_cols = [
-        "Store ID", "Product ID", "Category", "Region",
+st.markdown("---")
+
+
+# ==========================================================
+# 7. TABEL DATA DETAIL — REKOMENDASI AKSI MANAJER
+# ==========================================================
+
+st.subheader("📋 Detail Produk High Overstock & Rekomendasi Aksi")
+
+high_overstock_df = df_filtered[df_filtered["Segment"] == "High Overstock"].copy()
+
+
+def generate_recommendation(row) -> str:
+    """Menentukan rekomendasi aksi berdasarkan kondisi Units Sold & Units Ordered."""
+    if row["Units Sold"] < row["Units Ordered"] * 0.5:
+        return "Hentikan sementara Units Ordered & berikan diskon tambahan"
+    elif row["Units Ordered"] > 0 and row["Units Sold"] / row["Units Ordered"] < 0.8:
+        return "Pertimbangkan diskon tambahan untuk mempercepat penjualan"
+    else:
+        return "Pindahkan sebagian stok ke Region dengan Units Sold lebih tinggi"
+
+
+if not high_overstock_df.empty:
+    high_overstock_df["Rekomendasi Aksi Manajer"] = high_overstock_df.apply(
+        generate_recommendation, axis=1
+    )
+
+    display_cols = [
+        "Date", "Store ID", "Product ID", "Category", "Region",
         "Inventory Level", "Units Sold", "Units Ordered",
-        "Demand Forecast", "Price", "Discount"
+        "Price", "Discount", "Segment", "Rekomendasi Aksi Manajer"
     ]
-    tampilan_cols = [c for c in tampilan_cols if c in high_overstock_df.columns]
-
-    tabel_rekomendasi = (
-        high_overstock_df[tampilan_cols]
-        .drop_duplicates(subset=["Store ID", "Product ID"])
-        .sort_values("Inventory Level", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    tabel_rekomendasi["Rekomendasi"] = np.where(
-        tabel_rekomendasi["Units Sold"] < tabel_rekomendasi["Inventory Level"] * 0.3,
-        "Beri Diskon Segera & Kurangi Units Ordered",
-        "Kurangi Units Ordered Periode Berikutnya"
-    )
 
     st.dataframe(
-        tabel_rekomendasi,
+        high_overstock_df[display_cols].sort_values("Inventory Level", ascending=False),
         use_container_width=True,
-        height=420,
-        hide_index=True
+        height=420
     )
 
-    col_dl1, col_dl2 = st.columns([1, 4])
-    with col_dl1:
-        csv_export = tabel_rekomendasi.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Unduh Daftar (CSV)",
-            data=csv_export,
-            file_name="rekomendasi_high_overstock.csv",
-            mime="text/csv"
-        )
-
-    st.caption(
-        f"Total **{len(tabel_rekomendasi)}** kombinasi Toko & Produk teridentifikasi "
-        "sebagai High Overstock berdasarkan filter yang aktif."
+    csv_download = high_overstock_df[display_cols].to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Unduh Data High Overstock (CSV)",
+        data=csv_download,
+        file_name="high_overstock_products.csv",
+        mime="text/csv"
     )
+else:
+    st.info("Tidak ada produk pada segmen High Overstock untuk kombinasi filter saat ini.")
 
-st.divider()
+st.markdown("---")
 st.caption(
-    "Dashboard ini dibangun berdasarkan hasil model Agglomerative Clustering "
-    "(2 cluster, linkage: ward) yang telah dilatih sebelumnya. "
-    "Label segmen dipetakan secara dinamis berdasarkan rasio Inventory Level "
-    "terhadap Units Sold agar tetap konsisten meskipun label numerik cluster berubah."
+    "Dashboard ini dibuat untuk tugas Sistem Informasi Analitik Bisnis (SIAB) — "
+    "Segmentasi dihasilkan oleh model Agglomerative Clustering (unsupervised learning) "
+    "yang dijalankan otomatis di latar belakang saat aplikasi dimuat."
 )
