@@ -1,11 +1,16 @@
 # ==========================================================
 # SISTEM INFORMASI ANALITIK RETAIL — SEGMENTASI OVERSTOCK
 # Model      : Agglomerative Clustering (Unsupervised Learning)
-# Target     : Manajer Retail (Non-Teknis) & Tim Analis
-# Versi      : 3.0 — Multi-Page App (Dashboard, Simulasi, Analisis Klaster)
-#              Tema Modern Navy/Coral/Teal, Satuan Eksplisit,
-#              Dendrogram, Countplot, Boxplot, Heatmap Korelasi
+# Target     : Manajer Retail (Non-Teknis)
+# Versi      : 4.0 — Multi-Page App (Dashboard, Simulasi Risiko Overstock,
+#              Profil Segmen), Tema Modern Navy/Coral/Teal, Satuan Eksplisit.
+#              Seluruh konten teknis/akademis (dendrogram, metrik evaluasi,
+#              countplot teknis, heatmap korelasi) telah dihilangkan dan
+#              diganti dengan ringkasan bisnis yang intuitif.
 # Catatan    : Membutuhkan streamlit >= 1.33 (st.navigation & st.Page)
+#              Pipeline Agglomerative Clustering tetap berjalan penuh di
+#              latar belakang (background) — tidak ada fungsionalitas model
+#              yang dihilangkan, hanya tampilan yang disederhanakan.
 # ==========================================================
 
 import warnings
@@ -13,24 +18,12 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
-
-from scipy.cluster.hierarchy import dendrogram, linkage
 
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.cluster import AgglomerativeClustering
-from sklearn.metrics import (
-    silhouette_score,
-    davies_bouldin_score,
-    calinski_harabasz_score,
-)
-
-sns.set_theme(style="whitegrid")
 
 
 # ==========================================================
@@ -92,100 +85,38 @@ NUMERIC_OUTLIER_COLS = [
 # ==========================================================
 
 def get_theme_settings() -> dict:
-
+    """
+    Mendeteksi mode tema aktif Streamlit (light/dark) dan mengembalikan
+    pengaturan visual (template Plotly, warna font, warna grid) yang
+    kontras & konsisten di kedua mode.
+    """
     base = st.get_option("theme.base")
 
     if base == "dark":
         return {
             "template": "plotly_dark",
-
             "font_color": "#ECF0F1",
-
-            # khusus Plotly
             "plotly_grid": "rgba(255,255,255,0.12)",
-
-            # khusus Matplotlib
-            "mpl_grid": (1, 1, 1, 0.12),
-
-            "mpl_face": "none",
         }
 
     return {
         "template": "plotly_white",
-
         "font_color": COLOR_ACCENT_2,
-
-        # khusus Plotly
         "plotly_grid": "rgba(52,73,94,0.10)",
-
-        # khusus Matplotlib
-        "mpl_grid": (52/255, 73/255, 94/255, 0.10),
-
-        "mpl_face": "none",
-    }
-    
-    base = st.get_option("theme.base")
-    if base == "dark":
-        return {
-            "template": "plotly_dark",
-            "font_color": "#ECF0F1",
-            "grid_color": "rgba(255, 255, 255, 0.12)",
-            "mpl_face": "none",
-        }
-    return {
-        "template": "plotly_white",
-        "font_color": COLOR_ACCENT_2,
-        "grid_color": "rgba(52, 73, 94, 0.10)",
-        "mpl_face": "none",
     }
 
 
-def apply_chart_theme(fig, theme):
-
+def apply_chart_theme(fig, theme: dict):
+    """Menerapkan tema warna & background transparan ke sebuah figur Plotly."""
     fig.update_layout(
         template=theme["template"],
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color=theme["font_color"]),
     )
-
-    fig.update_xaxes(
-        gridcolor=theme["plotly_grid"],
-        zerolinecolor=theme["plotly_grid"]
-    )
-
-    fig.update_yaxes(
-        gridcolor=theme["plotly_grid"],
-        zerolinecolor=theme["plotly_grid"]
-    )
-
+    fig.update_xaxes(gridcolor=theme["plotly_grid"], zerolinecolor=theme["plotly_grid"])
+    fig.update_yaxes(gridcolor=theme["plotly_grid"], zerolinecolor=theme["plotly_grid"])
     return fig
-
-
-def apply_matplotlib_theme(fig, ax, theme):
-
-    fig.patch.set_alpha(0)
-
-    ax.set_facecolor(theme["mpl_face"])
-
-    ax.tick_params(colors=theme["font_color"])
-
-    ax.xaxis.label.set_color(theme["font_color"])
-    ax.yaxis.label.set_color(theme["font_color"])
-
-    ax.title.set_color(theme["font_color"])
-
-    for spine in ax.spines.values():
-        spine.set_color(theme["mpl_grid"])
-
-    ax.grid(
-        True,
-        color=theme["mpl_grid"],
-        linewidth=0.8,
-        alpha=0.6,
-    )
-
-    return fig, ax
 
 
 THEME = get_theme_settings()
@@ -244,7 +175,7 @@ def load_and_cluster_data(path: str):
        agar tetap bisa difilter per baris (Region, Category, Date).
     10. Mengembalikan seluruh objek pendukung (scaler, encoder, centroid, data
         level transaksi & produk) agar bisa dipakai ulang oleh Simulasi &
-        Analisis Klaster.
+        halaman Profil Segmen.
     """
     df_raw = pd.read_csv(path)
     df_raw["Date"] = pd.to_datetime(df_raw["Date"])
@@ -266,9 +197,6 @@ def load_and_cluster_data(path: str):
     df_clean.drop_duplicates(inplace=True)
 
     # --- Penanganan outlier (IQR clipping) pada fitur numerik utama ---
-    # Dilakukan di sini (level transaksi, sebelum agregasi) sesuai notebook
-    # riset "revisi_agglomerative", lalu dipakai bersama untuk dashboard,
-    # analisis klaster, dan pipeline model.
     for col in NUMERIC_OUTLIER_COLS:
         if col in df_clean.columns:
             Q1 = df_clean[col].quantile(0.25)
@@ -448,48 +376,88 @@ def predict_cluster_for_new_sample(input_values: dict, support: dict, df_source:
 
 
 # ==========================================================
-# 5. FUNGSI TERCACHE UNTUK HALAMAN ANALISIS KLASTER
-#    (dendrogram & metrik evaluasi K — cukup dihitung sekali)
+# 5. FUNGSI TERCACHE — RINGKASAN KARAKTERISTIK SEGMEN
+#    (dipakai di Dashboard & halaman Profil Segmen, bukan detail teknis)
 # ==========================================================
 
-@st.cache_data(show_spinner="Menyusun struktur dendrogram...")
-def compute_linkage_matrix(X_scaled_array: np.ndarray, max_samples: int = 200):
+@st.cache_data(show_spinner="Menyusun profil karakteristik segmen...")
+def compute_segment_profile(product_df: pd.DataFrame):
     """
-    Menghitung linkage matrix (Ward) untuk dendrogram. Jika jumlah data
-    produk cukup besar, diambil sampel acak (random_state tetap) demi
-    efisiensi memori & kejelasan visual, sesuai catatan pada notebook riset.
+    Menghitung rata-rata metrik bisnis utama per segmen (level produk),
+    dipakai untuk narasi profil segmen yang intuitif bagi manajer retail.
     """
-    if len(X_scaled_array) > max_samples:
-        rng = np.random.RandomState(42)
-        idx = rng.choice(len(X_scaled_array), max_samples, replace=False)
-        X_sample = X_scaled_array[idx]
-    else:
-        X_sample = X_scaled_array
-    Z = linkage(X_sample, method="ward")
-    return Z, len(X_sample)
+    profile = (
+        product_df.groupby("Segment")[
+            ["Inventory Level", "Units Sold", "Units Ordered", "Price", "Discount"]
+        ]
+        .mean()
+        .round(1)
+    )
+    return profile
 
 
-@st.cache_data(show_spinner="Menghitung metrik evaluasi klaster (K, Silhouette, DBI, CHI)...")
-def compute_cluster_metrics(X_scaled_array: np.ndarray, k_min: int = 2, k_max: int = 10):
-    """Sweep jumlah klaster K dan hitung metrik evaluasi, meniru notebook riset."""
-    rows = []
-    for k in range(k_min, k_max + 1):
-        model = AgglomerativeClustering(n_clusters=k, linkage="ward")
-        labels = model.fit_predict(X_scaled_array)
-        sil = silhouette_score(X_scaled_array, labels)
-        dbi = davies_bouldin_score(X_scaled_array, labels)
-        chi = calinski_harabasz_score(X_scaled_array, labels)
-        rows.append({
-            "K": k,
-            "Silhouette Score": round(sil, 4),
-            "Davies-Bouldin Index": round(dbi, 4),
-            "Calinski-Harabasz Index": round(chi, 2),
-        })
-    return pd.DataFrame(rows)
+@st.cache_data(show_spinner="Menyusun ringkasan kategori & produk dominan...")
+def compute_top_category_and_products(product_df: pd.DataFrame, segment_name: str, top_n: int = 10):
+    """
+    Menghitung kategori produk & Product ID yang paling mendominasi
+    sebuah segmen tertentu (default: High Overstock), berdasarkan jumlah
+    produk pada segmen tersebut.
+    """
+    seg_df = product_df[product_df["Segment"] == segment_name]
+
+    by_category = (
+        seg_df.groupby("Category").size()
+        .reset_index(name="Jumlah Produk")
+        .sort_values("Jumlah Produk", ascending=False)
+    )
+
+    by_product = (
+        seg_df.groupby(["Product ID", "Category"])
+        .agg(
+            **{
+                "Rata-rata Inventory (Pcs)": ("Inventory Level", "mean"),
+                "Total Units Sold (Pcs)": ("Units Sold", "sum"),
+            }
+        )
+        .reset_index()
+        .sort_values("Rata-rata Inventory (Pcs)", ascending=False)
+        .head(top_n)
+    )
+
+    return by_category, by_product
+
+
+@st.cache_data(show_spinner="Menghitung proporsi segmen per Store ID...")
+def compute_segment_proportion_by_store(product_df: pd.DataFrame):
+    """
+    Menghitung proporsi (%) jumlah produk pada masing-masing segmen
+    ('High Overstock' vs 'Moderate/Low Overstock') dikelompokkan
+    berdasarkan Store ID. Digunakan untuk visualisasi stacked bar chart
+    pada halaman Profil Segmen agar Manajer Retail dapat membandingkan
+    komposisi risiko overstock antar toko.
+    """
+    store_segment_counts = (
+        product_df.groupby(["Store ID", "Segment"]).size()
+        .reset_index(name="Jumlah Produk")
+    )
+
+    store_totals = (
+        store_segment_counts.groupby("Store ID")["Jumlah Produk"]
+        .transform("sum")
+    )
+
+    store_segment_counts["Proporsi (%)"] = (
+        store_segment_counts["Jumlah Produk"] / store_totals * 100
+    ).round(1)
+
+    # Urutkan Store ID secara alami agar tampilan chart lebih rapi
+    store_segment_counts = store_segment_counts.sort_values("Store ID")
+
+    return store_segment_counts
 
 
 # ==========================================================
-# 6. HALAMAN 1 — DASHBOARD RINGKASAN (EXECUTIVE DASHBOARD)
+# 6. HALAMAN 1 — DASHBOARD (EXECUTIVE DASHBOARD)
 # ==========================================================
 
 def page_dashboard():
@@ -531,7 +499,7 @@ def page_dashboard():
     )
     df_filtered = df.loc[mask].copy()
 
-    st.title("📊 Dashboard Ringkasan — Segmentasi Overstock Retail")
+    st.title("📊 Dashboard — Segmentasi Overstock Retail")
     st.markdown(
         "Dashboard ini membantu **Manajer Retail** memantau produk yang berpotensi mengalami "
         "*overstock* berdasarkan hasil segmentasi model **Agglomerative Clustering**, "
@@ -567,6 +535,42 @@ def page_dashboard():
 
     st.markdown("---")
 
+    # ------------------------------------------------------
+    # Profil Segmen & Karakteristik Kluster (bisnis, bukan teknis)
+    # ------------------------------------------------------
+    st.subheader("🧭 Profil Segmen")
+    st.caption(
+        "Ringkasan perilaku rata-rata tiap segmen."
+    )
+
+    profile_col1, profile_col2 = st.columns(2)
+    with profile_col1:
+        st.error(
+            "**🔴 High Overstock**\n\n"
+            "Ditandai dengan tingkat **inventory tinggi**, namun **units sold sangat rendah**. "
+            "Pola ini sering terjadi pada produk dengan **harga mahal** atau **diskon rendah**, "
+            "sehingga stok menumpuk dan modal tertahan lebih lama."
+        )
+    with profile_col2:
+        st.success(
+            "**🟢 Moderate/Low Overstock**\n\n"
+            "Perputaran stok tergolong **sehat** — jumlah **units sold sebanding** dengan "
+            "**units ordered**, sehingga risiko penumpukan stok relatif rendah."
+        )
+
+    st.markdown("")
+    profile_table = compute_segment_profile(support["product_df"])
+    profile_display = profile_table.rename(columns={
+        "Inventory Level": UNIT_LABELS["Inventory Level"],
+        "Units Sold": UNIT_LABELS["Units Sold"],
+        "Units Ordered": UNIT_LABELS["Units Ordered"],
+        "Price": UNIT_LABELS["Price"],
+        "Discount": UNIT_LABELS["Discount"],
+    })
+    st.dataframe(profile_display, use_container_width=True)
+
+    st.markdown("---")
+
     row1_col1, row1_col2 = st.columns([1, 1.4])
 
     with row1_col1:
@@ -580,7 +584,7 @@ def page_dashboard():
         fig_pie.update_traces(textinfo="percent+label")
         fig_pie.update_layout(showlegend=True, margin=dict(t=10, b=10, l=10, r=10))
         fig_pie = apply_chart_theme(fig_pie, THEME)
-        st.plotly_chart(fig_pie, width="stretch")
+        st.plotly_chart(fig_pie, use_container_width=True)
 
     with row1_col2:
         st.subheader("Kategori Produk dengan High Overstock Tertinggi")
@@ -601,7 +605,38 @@ def page_dashboard():
             margin=dict(t=10, b=10, l=10, r=10), coloraxis_showscale=False,
         )
         fig_bar_cat = apply_chart_theme(fig_bar_cat, THEME)
-        st.plotly_chart(fig_bar_cat, width="stretch")
+        st.plotly_chart(fig_bar_cat, use_container_width=True)
+
+    st.markdown("---")
+
+    # ------------------------------------------------------
+    # Produk & Kategori yang mendominasi segmen High Overstock
+    # ------------------------------------------------------
+    st.subheader("🏷️ Produk & Kategori yang Mendominasi Segmen High Overstock")
+    # st.caption(
+    #     "Gunakan informasi ini untuk memprioritaskan kategori dan produk mana yang "
+    #     "perlu ditinjau ulang strategi pemesanan atau diskonnya."
+    # )
+
+    top_cat_df, top_prod_df = compute_top_category_and_products(
+        support["product_df"], "High Overstock", top_n=10
+    )
+
+    dom_col1, dom_col2 = st.columns([1, 1.4])
+    with dom_col1:
+        fig_dom_cat = px.bar(
+            top_cat_df, x="Category", y="Jumlah Produk",
+            color_discrete_sequence=[COLOR_HIGH],
+            title="Kategori Produk Paling Dominan (High Overstock)",
+        )
+        fig_dom_cat.update_layout(margin=dict(t=40, b=10, l=10, r=10))
+        fig_dom_cat = apply_chart_theme(fig_dom_cat, THEME)
+        st.plotly_chart(fig_dom_cat, use_container_width=True)
+
+    with dom_col2:
+        st.markdown("**Top 10 Produk dengan Inventory Rata-rata Tertinggi**")
+        top_prod_display = top_prod_df.rename(columns={"Product ID": "ID Produk", "Category": "Kategori"})
+        st.dataframe(top_prod_display, use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
@@ -634,12 +669,12 @@ def page_dashboard():
         })
         st.dataframe(
             display_df.sort_values(UNIT_LABELS["Inventory Level"], ascending=False),
-           width="stretch", height=420,
+            use_container_width=True, height=420,
         )
 
         csv_download = high_overstock_df[display_cols].to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇️ Unduh Data High Overstock (CSV)", data=csv_download,
+            "Unduh Data High Overstock (CSV)", data=csv_download,
             file_name="high_overstock_products.csv", mime="text/csv",
         )
     else:
@@ -647,17 +682,15 @@ def page_dashboard():
 
 
 # ==========================================================
-# 7. HALAMAN 2 — SIMULASI & PREDIKSI MODEL (PREDICTIVE SIMULATOR)
+# 7. HALAMAN 2 — SIMULASI RISIKO OVERSTOCK (PREDICTIVE SIMULATOR)
 # ==========================================================
 
 def page_simulation():
-    st.title("🧪 Simulasi & Prediksi Model")
+    st.title("🧪 Simulasi Risiko Overstock")
     st.caption(
         "Masukkan data produk hipotetis (misalnya rencana pemesanan stok baru) untuk melihat "
-        "ke segmen mana produk tersebut kemungkinan besar akan masuk. Karena Agglomerative "
-        "Clustering tidak memiliki fungsi prediksi bawaan, sistem memetakan data baru ke "
-        "**cluster dengan centroid (titik pusat) terdekat** menggunakan Jarak Euclidean "
-        "terhadap centroid model."
+        "ke segmen risiko mana produk tersebut kemungkinan besar akan masuk, berdasarkan pola "
+        "historis yang telah dipelajari model."
     )
     st.markdown("---")
 
@@ -741,13 +774,7 @@ def page_simulation():
             unsafe_allow_html=True,
         )
 
-        with st.expander("Lihat detail jarak ke tiap centroid cluster (semakin kecil = semakin dekat)"):
-            dist_df = pd.DataFrame({
-                "Segment": [support["cluster_name_map"][c] for c in distances.keys()],
-                "Jarak Euclidean": list(distances.values()),
-            }).sort_values("Jarak Euclidean")
-            st.dataframe(dist_df, width="stretch", hide_index=True)
-
+        st.markdown("")
         if segment_result == "High Overstock":
             st.warning(
                 "⚠️ Produk simulasi ini berpotensi **overstock tinggi**. Pertimbangkan menahan "
@@ -756,151 +783,142 @@ def page_simulation():
         else:
             st.success("✅ Produk simulasi ini berada pada tingkat stok yang **wajar/rendah**.")
 
+        with st.expander("Lihat tingkat keyakinan hasil simulasi (semakin dekat ke satu segmen, semakin yakin)"):
+            dist_df = pd.DataFrame({
+                "Segment": [support["cluster_name_map"][c] for c in distances.keys()],
+                "Kedekatan ke Segmen": list(distances.values()),
+            }).sort_values("Kedekatan ke Segmen")
+            st.dataframe(dist_df, use_container_width=True, hide_index=True)
+
 
 # ==========================================================
-# 8. HALAMAN 3 — ANALISIS KLASTER (CLUSTER ANALYSIS & DENDROGRAM)
+# 8. HALAMAN 3 — PROFIL SEGMEN (RINGKASAN BISNIS)
 # ==========================================================
 
-def page_cluster_analysis():
-    st.title("📌 Analisis Klaster (Cluster Analysis & Dendrogram)")
+def page_segment_profile():
+    st.title("📌 Profil Segmen")
     st.caption(
-        "Halaman ini menjelaskan hasil analisis **Agglomerative Clustering** secara "
-        "teknis & akademis, mengikuti alur eksplorasi data pada notebook riset — mulai "
-        "dari struktur hierarki klaster, metrik evaluasi model, distribusi data, hingga "
-        "korelasi antar fitur numerik."
+        "Ringkasan karakteristik tiap segmen hasil model **Agglomerative Clustering**, "
+        "disusun dalam bahasa bisnis agar mudah dipahami tanpa latar belakang teknis."
     )
     st.markdown("---")
 
-    df_clean_raw = support["df_clean"]
-    X_scaled_df = support["X_scaled_df"]
+    product_df = support["product_df"]
 
     # ------------------------------------------------------
-    # 8.1 Dendrogram
+    # 8.1 Karakteristik Umum Segmen
     # ------------------------------------------------------
-    st.subheader("🌳 Dendrogram Hierarki Klaster (Ward Linkage)")
-    Z, n_sample = compute_linkage_matrix(X_scaled_df.values)
-    st.caption(
-        f"Dendrogram dibentuk menggunakan *Ward linkage* pada {n_sample} sampel data "
-        "produk (level Store ID + Product ID) yang telah distandardisasi."
-    )
-    fig_dendro, ax_dendro = plt.subplots(figsize=(13, 5))
-    dendrogram(Z, ax=ax_dendro, color_threshold=None, no_labels=True)
-    ax_dendro.set_title("Dendrogram Hierarki Klaster (Ward Linkage)")
-    ax_dendro.set_xlabel("Sampel Produk")
-    ax_dendro.set_ylabel("Jarak (Ward)")
-    apply_matplotlib_theme(fig_dendro, ax_dendro, THEME)
-    st.pyplot(fig_dendro, width="stretch")
-    plt.close(fig_dendro)
+    st.subheader("🧭 Karakteristik Umum Segmen")
+
+    profile_col1, profile_col2 = st.columns(2)
+    with profile_col1:
+        st.error(
+            "**🔴 High Overstock**\n\n"
+            "Ditandai dengan tingkat **inventory tinggi**, namun **units sold sangat rendah**. "
+            "Pola ini sering terjadi pada produk dengan **harga mahal** atau **diskon rendah**, "
+            "sehingga stok menumpuk dan modal tertahan lebih lama."
+        )
+    with profile_col2:
+        st.success(
+            "**🟢 Moderate/Low Overstock**\n\n"
+            "Perputaran stok tergolong **sehat** — jumlah **units sold sebanding** dengan "
+            "**units ordered**, sehingga risiko penumpukan stok relatif rendah."
+        )
+
+    st.markdown("")
+    profile_table = compute_segment_profile(product_df)
+    profile_display = profile_table.rename(columns={
+        "Inventory Level": UNIT_LABELS["Inventory Level"],
+        "Units Sold": UNIT_LABELS["Units Sold"],
+        "Units Ordered": UNIT_LABELS["Units Ordered"],
+        "Price": UNIT_LABELS["Price"],
+        "Discount": UNIT_LABELS["Discount"],
+    })
+    st.dataframe(profile_display, use_container_width=True)
 
     st.markdown("---")
 
     # ------------------------------------------------------
-    # 8.2 Metrik Evaluasi Model
+    # 8.2 Karakteristik Berdasarkan Kategori & Produk
     # ------------------------------------------------------
-    st.subheader("📈 Metrik Evaluasi Model (K, Silhouette, DBI, CHI)")
+    st.subheader("🏷️ Karakteristik Berdasarkan Kategori & Produk")
     st.caption(
-        "Perbandingan metrik evaluasi untuk beberapa kandidat jumlah klaster (K), "
-        "sebagai dasar pemilihan K=2 pada model final."
+        "Pilih segmen untuk melihat kategori produk dan Product ID mana saja yang "
+        "paling mendominasi segmen tersebut."
     )
-    metrics_df = compute_cluster_metrics(X_scaled_df.values, k_min=2, k_max=10)
-    st.dataframe(
-        metrics_df.style.apply(
-            lambda r: ["background-color: rgba(30,58,138,0.15)" if r["K"] == 2 else "" for _ in r],
-            axis=1,
+
+    selected_segment = st.selectbox(
+        "Pilih Segmen", options=["High Overstock", "Moderate/Low Overstock"]
+    )
+
+    top_cat_df, top_prod_df = compute_top_category_and_products(
+        product_df, selected_segment, top_n=10
+    )
+
+    seg_color = CLUSTER_COLOR_MAP.get(selected_segment, COLOR_ACCENT)
+
+    cat_col1, cat_col2 = st.columns([1, 1.4])
+    with cat_col1:
+        fig_cat = px.bar(
+            top_cat_df, x="Category", y="Jumlah Produk",
+            color_discrete_sequence=[seg_color],
+            title=f"Kategori Produk Paling Dominan — {selected_segment}",
+        )
+        fig_cat.update_layout(margin=dict(t=40, b=10, l=10, r=10))
+        fig_cat = apply_chart_theme(fig_cat, THEME)
+        st.plotly_chart(fig_cat, use_container_width=True)
+
+    with cat_col2:
+        st.markdown(f"**Top 10 Produk (ID Produk) — {selected_segment}**")
+        top_prod_display = top_prod_df.rename(columns={"Product ID": "ID Produk", "Category": "Kategori"})
+        st.dataframe(top_prod_display, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ------------------------------------------------------
+    # 8.3 Proporsi Kategori Cluster per Store ID
+    # ------------------------------------------------------
+    st.subheader("🏬 Proporsi Segmen Overstock per Store ID")
+    st.caption(
+        "Grafik ini menunjukkan komposisi (%) segmen **High Overstock** vs "
+        "**Moderate/Low Overstock** pada masing-masing Store ID, sehingga "
+        "dapat mengidentifikasi toko mana yang paling banyak menyimpan "
+        "produk berisiko overstock tinggi dan memprioritaskan tindakan (audit stok, "
+        "distribusi ulang, atau strategi diskon) pada toko tersebut."
+    )
+
+    store_segment_df = compute_segment_proportion_by_store(product_df)
+
+    fig_store_segment = px.bar(
+        store_segment_df,
+        x="Proporsi (%)",
+        y="Store ID",
+        color="Segment",
+        orientation="h",
+        color_discrete_map=CLUSTER_COLOR_MAP,
+        text=store_segment_df["Proporsi (%)"].map(lambda v: f"{v:.1f}%"),
+        custom_data=["Segment", "Jumlah Produk"],
+    )
+    fig_store_segment.update_traces(
+        hovertemplate=(
+            "Store ID: %{y}<br>"
+            "Segmen: %{customdata[0]}<br>"
+            "Proporsi: %{x:.1f}%<br>"
+            "Jumlah Produk: %{customdata[1]}<extra></extra>"
         ),
-        width="stretch", hide_index=True,
+        textposition="inside",
     )
-    st.caption(
-        "Baris **K = 2** ditandai karena merupakan konfigurasi yang digunakan pada model "
-        "final (High Overstock vs Moderate/Low Overstock)."
+    fig_store_segment.update_layout(
+        barmode="stack",
+        xaxis_title="Proporsi Produk (%)",
+        yaxis_title="Store ID",
+        yaxis=dict(type="category"),
+        legend_title_text="Segmen",
+        margin=dict(t=20, b=10, l=10, r=10),
+        height=max(350, 40 * store_segment_df["Store ID"].nunique()),
     )
-
-    m_col1, m_col2, m_col3 = st.columns(3)
-    row_k2 = metrics_df[metrics_df["K"] == 2].iloc[0]
-    with m_col1:
-        st.metric("Silhouette Score (K=2)", f"{row_k2['Silhouette Score']:.4f}")
-    with m_col2:
-        st.metric("Davies-Bouldin Index (K=2)", f"{row_k2['Davies-Bouldin Index']:.4f}")
-    with m_col3:
-        st.metric("Calinski-Harabasz Index (K=2)", f"{row_k2['Calinski-Harabasz Index']:.2f}")
-
-    st.markdown("---")
-
-    # ------------------------------------------------------
-    # 8.3 Distribusi Kategorikal (Countplots)
-    # ------------------------------------------------------
-    st.subheader("📊 Distribusi Data Kategorikal")
-
-    def make_countplot(col: str, title: str, rotate: bool = False):
-        counts = df_clean_raw[col].astype(str).value_counts().reset_index()
-        counts.columns = [col, "Jumlah"]
-        fig = px.bar(
-            counts, x=col, y="Jumlah", color_discrete_sequence=[COLOR_ACCENT], title=title,
-        )
-        fig.update_layout(margin=dict(t=40, b=10, l=10, r=10))
-        if rotate:
-            fig.update_xaxes(tickangle=-45)
-        return apply_chart_theme(fig, THEME)
-
-    cnt_col1, cnt_col2 = st.columns(2)
-    with cnt_col1:
-        st.plotly_chart(make_countplot("Store ID", "Distribusi Store ID"), width="stretch")
-        st.plotly_chart(make_countplot("Region", "Distribusi Region"), width="stretch")
-        st.plotly_chart(make_countplot("Seasonality", "Distribusi Seasonality"), width="stretch")
-    with cnt_col2:
-        st.plotly_chart(make_countplot("Category", "Distribusi Category", rotate=True), width="stretch")
-        st.plotly_chart(make_countplot("Weather Condition", "Distribusi Weather Condition"), width="stretch")
-
-    st.markdown("---")
-
-    # ------------------------------------------------------
-    # 8.4 Boxplot Karakteristik Klaster
-    # ------------------------------------------------------
-    st.subheader("📦 Analisis Boxplot Karakteristik Data")
-
-    def make_boxplot(x_col: str, y_col: str, title: str):
-        fig = px.box(
-            df_clean_raw, x=x_col, y=y_col, color_discrete_sequence=[COLOR_ACCENT],
-            title=title, labels={y_col: UNIT_LABELS.get(y_col, y_col)},
-        )
-        fig.update_layout(margin=dict(t=40, b=10, l=10, r=10))
-        return apply_chart_theme(fig, THEME)
-
-    box_col1, box_col2 = st.columns(2)
-    with box_col1:
-        st.plotly_chart(
-            make_boxplot("Category", "Inventory Level", "Inventory Level (Pcs) vs Category"),
-            width="stretch",
-        )
-        st.plotly_chart(
-            make_boxplot("Store ID", "Inventory Level", "Inventory Level (Pcs) vs Store ID"),
-            width="stretch",
-        )
-    with box_col2:
-        st.plotly_chart(
-            make_boxplot("Category", "Units Sold", "Units Sold (Pcs) vs Category"),
-            width="stretch",
-        )
-        st.plotly_chart(
-            make_boxplot("Store ID", "Units Sold", "Units Sold (Pcs) vs Store ID"),
-            width="stretch",
-        )
-
-    st.markdown("---")
-
-    # ------------------------------------------------------
-    # 8.5 Korelasi Fitur Numerik
-    # ------------------------------------------------------
-    st.subheader("🔗 Korelasi Antar Fitur Numerik")
-    numeric_cols = df_clean_raw.select_dtypes(include=["int64", "float64"]).columns.tolist()
-    corr = df_clean_raw[numeric_cols].corr()
-
-    fig_corr = px.imshow(
-        corr, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1, aspect="auto",
-    )
-    fig_corr.update_layout(margin=dict(t=10, b=10, l=10, r=10))
-    fig_corr = apply_chart_theme(fig_corr, THEME)
-    st.plotly_chart(fig_corr, width="stretch")
+    fig_store_segment = apply_chart_theme(fig_store_segment, THEME)
+    st.plotly_chart(fig_store_segment, use_container_width=True)
 
 
 # ==========================================================
@@ -908,8 +926,8 @@ def page_cluster_analysis():
 # ==========================================================
 
 pg = st.navigation([
-    st.Page(page_dashboard, title="Dashboard Ringkasan", icon="📊", default=True),
-    st.Page(page_simulation, title="Simulasi & Prediksi Model", icon="🧪"),
-    st.Page(page_cluster_analysis, title="Analisis Klaster", icon="📌"),
+    st.Page(page_dashboard, title="Dashboard", icon="📊", default=True),
+    st.Page(page_simulation, title="Simulasi Risiko Overstock", icon="🧪"),
+    st.Page(page_segment_profile, title="Profil Segmen", icon="📌"),
 ])
 pg.run()
