@@ -1,11 +1,19 @@
 # ==========================================================
 # SISTEM INFORMASI ANALITIK RETAIL — SEGMENTASI OVERSTOCK
-# Model      : Agglomerative Clustering (Unsupervised Learning)
+# Model      : Agglomerative Clustering (Unsupervised Learning) — REVISI
+#              n_clusters=2, linkage="ward" (arsitektur inti tidak berubah
+#              dari revisi_agglomerative terbaru), namun ruang fitur (feature
+#              space) diperluas: "Store ID" dan "Product ID" (versi encoded)
+#              kini turut menjadi bagian dari fitur clustering, sesuai
+#              notebook revisi yang menggunakan seluruh kolom product_df
+#              sebagai fitur model.
 # Target     : Manajer Retail (Non-Teknis)
-# Versi      : 4.0 — Multi-Page App (Dashboard, Simulasi Risiko Overstock,
+# Versi      : 4.1 — Multi-Page App (Dashboard, Simulasi Risiko Overstock,
 #              Profil Segmen), Tema Modern Navy/Coral/Teal, Satuan Eksplisit.
-#              Seluruh konten teknis/akademis (dendrogram, metrik evaluasi,
-#              countplot teknis, heatmap korelasi) telah dihilangkan dan
+#              Pipeline & feature space disesuaikan dengan hasil revisi
+#              pemodelan Agglomerative Clustering terbaru. Seluruh konten
+#              teknis/akademis (dendrogram, metrik evaluasi, countplot
+#              teknis, heatmap korelasi) tetap disembunyikan dari UI dan
 #              diganti dengan ringkasan bisnis yang intuitif.
 # Catatan    : Membutuhkan streamlit >= 1.33 (st.navigation & st.Page)
 #              Pipeline Agglomerative Clustering tetap berjalan penuh di
@@ -52,21 +60,21 @@ UNIT_LABELS = {
 
 # --- Palet warna korporat: kontras & konsisten di Light/Dark Mode ---
 COLOR_HIGH = "#D9534F"       # Coral / Soft Red      -> High Overstock
-COLOR_MODERATE = "#1ABC9C"   # Teal / Emerald         -> Moderate/Low Overstock
+COLOR_MODERATE = "#1ABC9C"   # Teal / Emerald         -> Moderate Overstock
 COLOR_ACCENT = "#1E3A8A"     # Navy                   -> aksen UI utama
 COLOR_ACCENT_2 = "#34495E"   # Slate Blue             -> aksen UI sekunder
 COLOR_MUTED = "#95A5A6"      # Muted Gray             -> elemen sekunder
 
 CLUSTER_COLOR_MAP = {
     "High Overstock": COLOR_HIGH,
-    "Moderate/Low Overstock": COLOR_MODERATE,
+    "Moderate Overstock": COLOR_MODERATE,
 }
 
 FEATURE_COLS = [
-    "Category_enc", "Region_enc", "Inventory Level", "Units Sold",
-    "Units Ordered", "Demand Forecast", "Price", "Discount",
-    "Weather Condition_enc", "Holiday/Promotion_enc", "Competitor Pricing",
-    "Seasonality_enc", "Year", "Month", "Day",
+    "Store ID_enc", "Product ID_enc", "Category_enc", "Region_enc",
+    "Inventory Level", "Units Sold", "Units Ordered", "Demand Forecast",
+    "Price", "Discount", "Weather Condition_enc", "Holiday/Promotion_enc",
+    "Competitor Pricing", "Seasonality_enc", "Year", "Month", "Day",
 ]
 
 CATEGORICAL_COLS = [
@@ -167,10 +175,15 @@ def load_and_cluster_data(path: str):
     3. Melakukan encoding kategorikal (khusus untuk kalkulasi model).
     4. Menangani outlier numerik (IQR clipping).
     5. Mengagregasi data pada level Store ID + Product ID (unit analisis produk).
-    6. Menstandardisasi fitur numerik.
-    7. Menjalankan AgglomerativeClustering (n_clusters=2, linkage='ward').
+    6. Menstandardisasi seluruh fitur (termasuk Store ID_enc & Product ID_enc,
+       sesuai revisi_agglomerative terbaru yang menggunakan seluruh kolom
+       product_df sebagai ruang fitur model — bukan hanya fitur perilaku).
+    7. Menjalankan AgglomerativeClustering (n_clusters=2, linkage='ward') —
+       arsitektur inti sesuai spesifikasi revisi (metric Euclidean default).
     8. Menentukan cluster mana yang merupakan "High Overstock" secara otomatis
-       berdasarkan rasio Inventory Level terhadap Units Sold (bukan hardcode index).
+       berdasarkan rasio Inventory Level terhadap Units Sold (bukan hardcode
+       index, sehingga penamaan cluster tetap valid meski komposisi/urutan
+       cluster berubah akibat penambahan fitur Store ID/Product ID).
     9. Menggabungkan label Cluster & Segment kembali ke data transaksi asli
        agar tetap bisa difilter per baris (Region, Category, Date).
     10. Mengembalikan seluruh objek pendukung (scaler, encoder, centroid, data
@@ -226,6 +239,8 @@ def load_and_cluster_data(path: str):
         .agg({
             "Category": "first",
             "Region": "first",
+            "Store ID_enc": "first",
+            "Product ID_enc": "first",
             "Category_enc": "first",
             "Region_enc": "first",
             "Inventory Level": "mean",
@@ -252,7 +267,10 @@ def load_and_cluster_data(path: str):
     X_scaled = scaler.fit_transform(X)
     X_scaled_df = pd.DataFrame(X_scaled, columns=FEATURE_COLS)
 
-    # --- Model Agglomerative Clustering (dijalankan otomatis di latar belakang) ---
+    # --- Model Agglomerative Clustering — REVISI (dijalankan otomatis di latar belakang) ---
+    # Konfigurasi n_clusters=2 & linkage="ward" sesuai revisi_agglomerative terbaru.
+    # Ruang fitur kini mencakup seluruh kolom product_df (termasuk Store ID_enc
+    # & Product ID_enc), bukan hanya fitur perilaku transaksi.
     model = AgglomerativeClustering(n_clusters=2, linkage="ward")
     cluster_labels = model.fit_predict(X_scaled)
     product_df["Cluster"] = cluster_labels
@@ -268,7 +286,7 @@ def load_and_cluster_data(path: str):
     high_cluster_label = ratio_per_cluster.idxmax()
     cluster_name_map = {
         high_cluster_label: "High Overstock",
-        1 - high_cluster_label: "Moderate/Low Overstock",
+        1 - high_cluster_label: "Moderate Overstock",
     }
     product_df["Segment"] = product_df["Cluster"].map(cluster_name_map)
 
@@ -317,12 +335,24 @@ def predict_cluster_for_new_sample(input_values: dict, support: dict, df_source:
     Memetakan satu baris data simulasi ke segmen cluster terdekat dengan
     memperbaiki efek bias skala akibat perbedaan data agregasi (SUM) vs
     data input tunggal, menggunakan Jarak Euclidean terhadap centroid
-    hasil Agglomerative Clustering.
+    hasil Agglomerative Clustering (arsitektur revisi: ruang fitur turut
+    menyertakan Store ID_enc & Product ID_enc).
+
+    Catatan (revisi): karena produk pada Simulator bersifat hipotetis (belum
+    tentu terkait Store ID/Product ID nyata), nilai Store ID_enc & Product
+    ID_enc yang dipakai adalah nilai modus (paling umum) dari data historis
+    hasil clustering — bukan nol/hardcode — sehingga sample simulasi tetap
+    diposisikan secara netral pada dua fitur tersebut, dan hasil kedekatan
+    ke centroid tetap didominasi oleh fitur perilaku (Inventory, Sales, dll).
     """
     encoders = support["encoders"]
     scaler = support["scaler"]
     centroids = support["centroids"]
     cluster_name_map = support["cluster_name_map"]
+    product_df = support["product_df"]
+
+    default_store_enc = product_df["Store ID_enc"].mode().iloc[0]
+    default_product_enc = product_df["Product ID_enc"].mode().iloc[0]
 
     avg_transaksi_per_produk = df_source.groupby(["Store ID", "Product ID"]).size().mean()
     if pd.isna(avg_transaksi_per_produk) or avg_transaksi_per_produk == 0:
@@ -345,6 +375,8 @@ def predict_cluster_for_new_sample(input_values: dict, support: dict, df_source:
         return np.clip(val, q1 - 1.5 * iqr, q3 + 1.5 * iqr)
 
     row = {
+        "Store ID_enc": default_store_enc,
+        "Product ID_enc": default_product_enc,
         "Category_enc": encoders["Category"].transform([input_values["Category"]])[0],
         "Region_enc": encoders["Region"].transform([input_values["Region"]])[0],
         "Inventory Level": clip_value(input_values["Inventory Level"], "Inventory Level"),
@@ -431,7 +463,7 @@ def compute_top_category_and_products(product_df: pd.DataFrame, segment_name: st
 def compute_segment_proportion_by_store(product_df: pd.DataFrame):
     """
     Menghitung proporsi (%) jumlah produk pada masing-masing segmen
-    ('High Overstock' vs 'Moderate/Low Overstock') dikelompokkan
+    ('High Overstock' vs 'Moderate Overstock') dikelompokkan
     berdasarkan Store ID. Digunakan untuk visualisasi stacked bar chart
     pada halaman Profil Segmen agar Manajer Retail dapat membandingkan
     komposisi risiko overstock antar toko.
@@ -514,7 +546,7 @@ def page_dashboard():
 
     # --- KPI Cards ---
     total_high = int((df_filtered["Segment"] == "High Overstock").sum())
-    total_moderate = int((df_filtered["Segment"] == "Moderate/Low Overstock").sum())
+    total_moderate = int((df_filtered["Segment"] == "Moderate Overstock").sum())
     avg_inventory = df_filtered["Inventory Level"].mean()
     avg_units_sold = df_filtered["Units Sold"].mean()
     avg_price = df_filtered["Price"].mean()
@@ -524,8 +556,8 @@ def page_dashboard():
         st.metric("🔴 High Overstock", f"{total_high:,} baris",
                    help="Jumlah baris data pada segmen High Overstock")
     with col2:
-        st.metric("🟢 Moderate/Low Overstock", f"{total_moderate:,} baris",
-                   help="Jumlah baris data pada segmen Moderate/Low Overstock")
+        st.metric("🟢 Moderate Overstock", f"{total_moderate:,} baris",
+                   help="Jumlah baris data pada segmen Moderate Overstock")
     with col3:
         st.metric("📊 Rata-rata Inventory", f"{avg_inventory:,.1f} Pcs")
     with col4:
@@ -553,7 +585,7 @@ def page_dashboard():
         )
     with profile_col2:
         st.success(
-            "**🟢 Moderate/Low Overstock**\n\n"
+            "**🟢 Moderate Overstock**\n\n"
             "Perputaran stok tergolong **sehat** — jumlah **units sold sebanding** dengan "
             "**units ordered**, sehingga risiko penumpukan stok relatif rendah."
         )
@@ -820,7 +852,7 @@ def page_segment_profile():
         )
     with profile_col2:
         st.success(
-            "**🟢 Moderate/Low Overstock**\n\n"
+            "**🟢 Moderate Overstock**\n\n"
             "Perputaran stok tergolong **sehat** — jumlah **units sold sebanding** dengan "
             "**units ordered**, sehingga risiko penumpukan stok relatif rendah."
         )
@@ -848,7 +880,7 @@ def page_segment_profile():
     )
 
     selected_segment = st.selectbox(
-        "Pilih Segmen", options=["High Overstock", "Moderate/Low Overstock"]
+        "Pilih Segmen", options=["High Overstock", "Moderate Overstock"]
     )
 
     top_cat_df, top_prod_df = compute_top_category_and_products(
@@ -881,7 +913,7 @@ def page_segment_profile():
     st.subheader("🏬 Proporsi Segmen Overstock per Store ID")
     st.caption(
         "Grafik ini menunjukkan komposisi (%) segmen **High Overstock** vs "
-        "**Moderate/Low Overstock** pada masing-masing Store ID, sehingga "
+        "**Moderate Overstock** pada masing-masing Store ID, sehingga "
         "dapat mengidentifikasi toko mana yang paling banyak menyimpan "
         "produk berisiko overstock tinggi dan memprioritaskan tindakan (audit stok, "
         "distribusi ulang, atau strategi diskon) pada toko tersebut."
