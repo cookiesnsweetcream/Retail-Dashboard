@@ -1,26 +1,3 @@
-# ==========================================================
-# SISTEM INFORMASI ANALITIK RETAIL — SEGMENTASI OVERSTOCK
-# Model      : Agglomerative Clustering (Unsupervised Learning) — REVISI
-#              n_clusters=2, linkage="ward" (arsitektur inti tidak berubah
-#              dari revisi_agglomerative terbaru), namun ruang fitur (feature
-#              space) diperluas: "Store ID" dan "Product ID" (versi encoded)
-#              kini turut menjadi bagian dari fitur clustering, sesuai
-#              notebook revisi yang menggunakan seluruh kolom product_df
-#              sebagai fitur model.
-# Target     : Manajer Retail (Non-Teknis)
-# Versi      : 4.1 — Multi-Page App (Dashboard, Simulasi Risiko Overstock,
-#              Profil Segmen), Tema Modern Navy/Coral/Teal, Satuan Eksplisit.
-#              Pipeline & feature space disesuaikan dengan hasil revisi
-#              pemodelan Agglomerative Clustering terbaru. Seluruh konten
-#              teknis/akademis (dendrogram, metrik evaluasi, countplot
-#              teknis, heatmap korelasi) tetap disembunyikan dari UI dan
-#              diganti dengan ringkasan bisnis yang intuitif.
-# Catatan    : Membutuhkan streamlit >= 1.33 (st.navigation & st.Page)
-#              Pipeline Agglomerative Clustering tetap berjalan penuh di
-#              latar belakang (background) — tidak ada fungsionalitas model
-#              yang dihilangkan, hanya tampilan yang disederhanakan.
-# ==========================================================
-
 import warnings
 warnings.filterwarnings("ignore")
 
