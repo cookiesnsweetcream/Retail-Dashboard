@@ -261,10 +261,11 @@ def load_and_cluster_data(path: str):
         .mean()
     )
     high_cluster_label = ratio_per_cluster.idxmax()
+
     cluster_name_map = {
-        high_cluster_label: "High Overstock",
-        1 - high_cluster_label: "Moderate Overstock",
-    }
+        high_cluster_label: "Moderate Overstock",
+        1 - high_cluster_label: "High Overstock",
+}
     product_df["Segment"] = product_df["Cluster"].map(cluster_name_map)
 
     # --- Hitung centroid tiap cluster di ruang fitur yang sudah discale ---
@@ -281,9 +282,6 @@ def load_and_cluster_data(path: str):
     )
 
     support_objects = {
-        "scaler": scaler,
-        "encoders": encoders,
-        "centroids": centroids,
         "cluster_name_map": cluster_name_map,
         "product_df": product_df,
         "X_scaled_df": X_scaled_df,
@@ -301,88 +299,6 @@ except FileNotFoundError:
         f"Pastikan file dataset berada di folder yang sama dengan `app.py`."
     )
     st.stop()
-
-
-# ==========================================================
-# 4. FUNGSI SIMULASI — MEMETAKAN DATA BARU KE CLUSTER TERDEKAT
-# ==========================================================
-
-def predict_cluster_for_new_sample(input_values: dict, support: dict, df_source: pd.DataFrame):
-    """
-    Memetakan satu baris data simulasi ke segmen cluster terdekat dengan
-    memperbaiki efek bias skala akibat perbedaan data agregasi (SUM) vs
-    data input tunggal, menggunakan Jarak Euclidean terhadap centroid
-    hasil Agglomerative Clustering (arsitektur revisi: ruang fitur turut
-    menyertakan Store ID_enc & Product ID_enc).
-
-    Catatan (revisi): karena produk pada Simulator bersifat hipotetis (belum
-    tentu terkait Store ID/Product ID nyata), nilai Store ID_enc & Product
-    ID_enc yang dipakai adalah nilai modus (paling umum) dari data historis
-    hasil clustering — bukan nol/hardcode — sehingga sample simulasi tetap
-    diposisikan secara netral pada dua fitur tersebut, dan hasil kedekatan
-    ke centroid tetap didominasi oleh fitur perilaku (Inventory, Sales, dll).
-    """
-    encoders = support["encoders"]
-    scaler = support["scaler"]
-    centroids = support["centroids"]
-    cluster_name_map = support["cluster_name_map"]
-    product_df = support["product_df"]
-
-    default_store_enc = product_df["Store ID_enc"].mode().iloc[0]
-    default_product_enc = product_df["Product ID_enc"].mode().iloc[0]
-
-    avg_transaksi_per_produk = df_source.groupby(["Store ID", "Product ID"]).size().mean()
-    if pd.isna(avg_transaksi_per_produk) or avg_transaksi_per_produk == 0:
-        avg_transaksi_per_produk = 1.0
-
-    scaled_units_sold = input_values["Units Sold"] * avg_transaksi_per_produk
-    scaled_units_ordered = input_values["Units Ordered"] * avg_transaksi_per_produk
-
-    outlier_bounds = {
-        "Inventory Level": (df_source["Inventory Level"].quantile(0.25), df_source["Inventory Level"].quantile(0.75)),
-        "Price": (df_source["Price"].quantile(0.25), df_source["Price"].quantile(0.75)),
-        "Discount": (df_source["Discount"].quantile(0.25), df_source["Discount"].quantile(0.75)),
-        "Competitor Pricing": (df_source["Competitor Pricing"].quantile(0.25), df_source["Competitor Pricing"].quantile(0.75)),
-        "Demand Forecast": (df_source["Demand Forecast"].quantile(0.25), df_source["Demand Forecast"].quantile(0.75)),
-    }
-
-    def clip_value(val, col_name):
-        q1, q3 = outlier_bounds[col_name]
-        iqr = q3 - q1
-        return np.clip(val, q1 - 1.5 * iqr, q3 + 1.5 * iqr)
-
-    row = {
-        "Store ID_enc": default_store_enc,
-        "Product ID_enc": default_product_enc,
-        "Category_enc": encoders["Category"].transform([input_values["Category"]])[0],
-        "Region_enc": encoders["Region"].transform([input_values["Region"]])[0],
-        "Inventory Level": clip_value(input_values["Inventory Level"], "Inventory Level"),
-        "Units Sold": scaled_units_sold,
-        "Units Ordered": scaled_units_ordered,
-        "Demand Forecast": clip_value(input_values["Demand Forecast"], "Demand Forecast"),
-        "Price": clip_value(input_values["Price"], "Price"),
-        "Discount": clip_value(input_values["Discount"], "Discount"),
-        "Weather Condition_enc": encoders["Weather Condition"].transform([input_values["Weather Condition"]])[0],
-        "Holiday/Promotion_enc": input_values["Holiday/Promotion"],
-        "Competitor Pricing": clip_value(input_values["Competitor Pricing"], "Competitor Pricing"),
-        "Seasonality_enc": encoders["Seasonality"].transform([input_values["Seasonality"]])[0],
-        "Year": input_values["Year"],
-        "Month": input_values["Month"],
-        "Day": input_values["Day"],
-    }
-
-    X_new = pd.DataFrame([row])[FEATURE_COLS]
-    X_new_scaled = scaler.transform(X_new)[0]
-
-    distances = {
-        label: float(np.linalg.norm(X_new_scaled - centroid))
-        for label, centroid in centroids.items()
-    }
-    nearest_cluster = min(distances, key=distances.get)
-    segment = cluster_name_map[nearest_cluster]
-
-    return segment, distances
-
 
 # ==========================================================
 # 5. FUNGSI TERCACHE — RINGKASAN KARAKTERISTIK SEGMEN
@@ -689,117 +605,6 @@ def page_dashboard():
     else:
         st.info("Tidak ada produk pada segmen High Overstock untuk kombinasi filter saat ini.")
 
-
-# ==========================================================
-# 7. HALAMAN 2 — SIMULASI RISIKO OVERSTOCK (PREDICTIVE SIMULATOR)
-# ==========================================================
-
-def page_simulation():
-    st.title("🧪 Simulasi Risiko Overstock")
-    st.caption(
-        "Masukkan data produk hipotetis (misalnya rencana pemesanan stok baru) untuk melihat "
-        "ke segmen risiko mana produk tersebut kemungkinan besar akan masuk, berdasarkan pola "
-        "historis yang telah dipelajari model."
-    )
-    st.markdown("---")
-
-    category_options = sorted(df["Category"].dropna().unique().tolist())
-    region_options = sorted(df["Region"].dropna().unique().tolist())
-    min_date = df["Date"].min().date()
-    max_date = df["Date"].max().date()
-
-    with st.form("simulasi_form"):
-        st.markdown("**Informasi Produk**")
-        f_col1, f_col2, f_col3 = st.columns(3)
-
-        with f_col1:
-            sim_category = st.selectbox("Category", options=category_options)
-            sim_region = st.selectbox("Region", options=region_options)
-            sim_weather = st.selectbox(
-                "Weather Condition",
-                options=sorted(df["Weather Condition"].dropna().unique().tolist()),
-            )
-
-        with f_col2:
-            sim_seasonality = st.selectbox(
-                "Seasonality",
-                options=sorted(df["Seasonality"].dropna().unique().tolist()),
-            )
-            sim_holiday = st.selectbox(
-                "Holiday/Promotion", options=[0, 1],
-                format_func=lambda x: "Ya (Promo/Libur)" if x == 1 else "Tidak",
-            )
-            sim_date = st.date_input(
-                "Tanggal Simulasi", value=max_date, min_value=min_date, max_value=max_date,
-            )
-
-        with f_col3:
-            st.write("")
-
-        st.markdown("---")
-        st.markdown("**Data Kuantitas & Harga**")
-        n_col1, n_col2, n_col3, n_col4 = st.columns(4)
-
-        with n_col1:
-            sim_inventory = st.number_input(UNIT_LABELS["Inventory Level"], min_value=0.0, value=200.0, step=1.0)
-            sim_units_sold = st.number_input(UNIT_LABELS["Units Sold"], min_value=0.0, value=100.0, step=1.0)
-
-        with n_col2:
-            sim_units_ordered = st.number_input(UNIT_LABELS["Units Ordered"], min_value=0.0, value=60.0, step=1.0)
-            sim_demand_forecast = st.number_input(UNIT_LABELS["Demand Forecast"], min_value=0.0, value=110.0, step=1.0)
-
-        with n_col3:
-            sim_price = st.number_input(UNIT_LABELS["Price"], min_value=0.0, value=50.0, step=0.5, format="%.2f")
-            sim_competitor_price = st.number_input(UNIT_LABELS["Competitor Pricing"], min_value=0.0, value=48.0, step=0.5, format="%.2f")
-
-        with n_col4:
-            sim_discount = st.number_input(UNIT_LABELS["Discount"], min_value=0.0, max_value=100.0, value=10.0, step=1.0)
-
-        submitted = st.form_submit_button("▶️ Jalankan Simulasi")
-
-    if submitted:
-        sim_input = {
-            "Category": sim_category, "Region": sim_region, "Weather Condition": sim_weather,
-            "Seasonality": sim_seasonality, "Holiday/Promotion": sim_holiday,
-            "Inventory Level": sim_inventory, "Units Sold": sim_units_sold,
-            "Units Ordered": sim_units_ordered, "Demand Forecast": sim_demand_forecast,
-            "Price": sim_price, "Competitor Pricing": sim_competitor_price,
-            "Discount": sim_discount, "Year": sim_date.year, "Month": sim_date.month, "Day": sim_date.day,
-        }
-
-        segment_result, distances = predict_cluster_for_new_sample(sim_input, support, df)
-        result_color = CLUSTER_COLOR_MAP.get(segment_result, COLOR_ACCENT)
-
-        st.markdown(
-            f"""
-            <div style="padding: 18px 22px; border-radius: 10px;
-                        background-color: {result_color}22; border-left: 6px solid {result_color};">
-                <span style="font-size: 0.95rem; color: {THEME['font_color']};">Hasil Simulasi:</span><br>
-                <span style="font-size: 1.4rem; font-weight: 700; color: {result_color};">
-                    {segment_result}
-                </span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("")
-        if segment_result == "High Overstock":
-            st.warning(
-                "⚠️ Produk simulasi ini berpotensi **overstock tinggi**. Pertimbangkan menahan "
-                "sebagian Units Ordered atau menyiapkan strategi diskon."
-            )
-        else:
-            st.success("✅ Produk simulasi ini berada pada tingkat stok yang **wajar/rendah**.")
-
-        with st.expander("Lihat tingkat keyakinan hasil simulasi (semakin dekat ke satu segmen, semakin yakin)"):
-            dist_df = pd.DataFrame({
-                "Segment": [support["cluster_name_map"][c] for c in distances.keys()],
-                "Kedekatan ke Segmen": list(distances.values()),
-            }).sort_values("Kedekatan ke Segmen")
-            st.dataframe(dist_df, use_container_width=True, hide_index=True)
-
-
 # ==========================================================
 # 8. HALAMAN 3 — PROFIL SEGMEN (RINGKASAN BISNIS)
 # ==========================================================
@@ -936,7 +741,6 @@ def page_segment_profile():
 
 pg = st.navigation([
     st.Page(page_dashboard, title="Dashboard", icon="📊", default=True),
-    st.Page(page_simulation, title="Simulasi Risiko Overstock", icon="🧪"),
     st.Page(page_segment_profile, title="Profil Segmen", icon="📌"),
 ])
 pg.run()
