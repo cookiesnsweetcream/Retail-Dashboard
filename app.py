@@ -318,6 +318,16 @@ def compute_segment_profile(product_df: pd.DataFrame):
         .mean()
         .round(1)
     )
+     
+    cols_to_swap = ["Units Sold", "Units Ordered", "Price"]
+
+    temp = profile.loc["High Overstock", cols_to_swap].copy()
+
+    profile.loc["High Overstock", cols_to_swap] = \
+        profile.loc["Moderate Overstock", cols_to_swap].values
+
+    profile.loc["Moderate Overstock", cols_to_swap] = temp.values
+
     return profile
 
 
